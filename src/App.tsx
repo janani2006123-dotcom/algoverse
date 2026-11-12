@@ -22,6 +22,8 @@ import { AccessibilityPage } from './pages/AccessibilityPage';
 import { AboutPage } from './pages/AboutPage';
 import { AuthPage } from './pages/AuthPage';
 import { ReceiverSosPage } from './pages/ReceiverSosPage';
+import { EmergencyContactsPage } from './pages/EmergencyContactsPage';
+import { SosHistoryPage } from './pages/SosHistoryPage';
 
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
@@ -69,6 +71,10 @@ const AppContent: React.FC = () => {
         return <AboutPage />;
       case 'auth':
         return <AuthPage />;
+      case 'emergency-contacts':
+        return <EmergencyContactsPage />;
+      case 'sos-history':
+        return <SosHistoryPage />;
       default:
         return <HomePage />;
     }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { SIGN_DICTIONARY } from '../data/signDictionary';
 import {
@@ -15,11 +15,22 @@ import {
   User,
   ShieldCheck,
   CheckCircle,
+  Users,
+  History,
+  Settings,
+  LogOut,
+  Phone,
+  ShieldAlert,
+  Star,
+  CheckCheck,
 } from 'lucide-react';
+import { SosEventRecord } from '../types';
 
 export const DashboardPage: React.FC = () => {
   const {
     user,
+    authToken,
+    logout,
     setCurrentPage,
     translationHistory,
     savedVocabulary,
@@ -27,9 +38,41 @@ export const DashboardPage: React.FC = () => {
     speakText,
   } = useApp();
 
-  const guideAvatar = '/src/assets/images/signbridge_interpreter_avatar_1794470891825.jpg';
+  const [recentSosEvents, setRecentSosEvents] = useState<SosEventRecord[]>([]);
+  const [loadingSos, setLoadingSos] = useState(false);
 
+  const guideAvatar = '/src/assets/images/signbridge_interpreter_avatar_1794470891825.jpg';
   const savedSigns = SIGN_DICTIONARY.filter((s) => savedVocabulary.includes(s.id));
+
+  useEffect(() => {
+    if (!authToken) {
+      setRecentSosEvents([]);
+      return;
+    }
+    let isMounted = true;
+    const fetchRecentSos = async () => {
+      try {
+        setLoadingSos(true);
+        const res = await fetch('/api/sos/history', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted && data.success && Array.isArray(data.events)) {
+            setRecentSosEvents(data.events.slice(0, 3));
+          }
+        }
+      } catch (e) {
+        // quiet fallback
+      } finally {
+        if (isMounted) setLoadingSos(false);
+      }
+    };
+    fetchRecentSos();
+    return () => {
+      isMounted = false;
+    };
+  }, [authToken]);
 
   return (
     <div className="space-y-8 max-w-6xl mx-auto pb-16">
@@ -50,32 +93,64 @@ export const DashboardPage: React.FC = () => {
                 Welcome back, {user ? user.name : 'SignBridge Guest'}
               </h1>
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                Active Member
+                {authToken ? 'Authenticated' : 'Guest'}
               </span>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Role: <strong className="capitalize text-slate-700 dark:text-slate-300">{user?.role || 'Signer & Speaker'}</strong> · Ready for real-time translation and learning.
+              Role: <strong className="capitalize text-slate-700 dark:text-slate-300">{user?.role || 'Signer & Speaker'}</strong> · Ready for real-time translation and multi-user emergency safety.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
             onClick={() => setCurrentPage('sign-to-voice')}
-            className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-xs flex items-center gap-2"
+            className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-xs flex items-center gap-1.5"
           >
-            <Camera className="w-4 h-4" />
+            <Camera className="w-3.5 h-3.5" />
             <span>Launch Camera</span>
           </button>
           <button
             type="button"
             onClick={() => setCurrentPage('sos')}
-            className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors shadow-xs flex items-center gap-1.5"
+            className="px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 transition-colors shadow-xs flex items-center gap-1.5"
           >
             <AlertTriangle className="w-3.5 h-3.5" />
             <span>SOS</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setCurrentPage('profile')}
+            className="px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5"
+            title="Profile & Account Settings"
+          >
+            <Settings className="w-3.5 h-3.5" />
+            <span>Settings</span>
+          </button>
+          {authToken ? (
+            <button
+              type="button"
+              onClick={() => {
+                logout();
+                setCurrentPage('auth');
+              }}
+              className="px-3 py-2 rounded-xl text-xs font-semibold text-rose-600 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 hover:bg-rose-100 transition-colors flex items-center gap-1.5"
+              title="Sign Out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Logout</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCurrentPage('auth')}
+              className="px-3 py-2 rounded-xl text-xs font-semibold text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900 hover:bg-indigo-100 transition-colors flex items-center gap-1.5"
+            >
+              <User className="w-3.5 h-3.5" />
+              <span>Sign In</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -108,12 +183,144 @@ export const DashboardPage: React.FC = () => {
           <span className="text-xs text-amber-600">Quick-access signs</span>
         </div>
 
-        <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
-          <span className="text-xs font-medium text-slate-500">Emergency Contacts</span>
+        <button
+          type="button"
+          onClick={() => setCurrentPage('emergency-contacts')}
+          className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1 text-left hover:border-indigo-400 transition-colors group cursor-pointer"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500">Emergency Contacts</span>
+            <Users className="w-3.5 h-3.5 text-indigo-500 group-hover:scale-110 transition-transform" />
+          </div>
           <div className="text-2xl font-bold font-mono text-slate-900 dark:text-white tabular-nums">
             {emergencyContacts.length}
           </div>
-          <span className="text-xs text-emerald-600">GPS Broadcast Ready</span>
+          <span className="text-xs text-emerald-600 flex items-center gap-1">
+            <span>Manage Contacts</span>
+            <ArrowRight className="w-3 h-3" />
+          </span>
+        </button>
+      </div>
+
+      {/* Emergency Management & SOS Audit Cards */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Emergency Contacts Preview */}
+        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Users className="w-4 h-4 text-rose-500" />
+              <span>Your Emergency Contacts ({emergencyContacts.length})</span>
+            </h3>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('emergency-contacts')}
+              className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1 font-semibold"
+            >
+              <span>Manage All</span>
+              <ArrowRight className="w-3 h-3" />
+            </button>
+          </div>
+
+          {emergencyContacts.length === 0 ? (
+            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 text-center space-y-2">
+              <p className="text-xs text-slate-500">No emergency contacts saved yet for this account.</p>
+              <button
+                type="button"
+                onClick={() => setCurrentPage('emergency-contacts')}
+                className="px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg inline-flex items-center gap-1"
+              >
+                <span>Add First Contact</span>
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {emergencyContacts.slice(0, 3).map((contact) => (
+                <div
+                  key={contact.id}
+                  className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                      <Phone className="w-3.5 h-3.5" />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <span>{contact.name}</span>
+                        {contact.isPreferred && (
+                          <Star className="w-3 h-3 text-amber-500 fill-amber-500" />
+                        )}
+                      </div>
+                      <div className="text-slate-500 dark:text-slate-400 text-xs font-mono">
+                        {contact.phone} · {contact.relation}
+                      </div>
+                    </div>
+                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 font-mono">
+                    Ready
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Recent SOS History Preview */}
+        <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-amber-500" />
+              <span>Recent SOS Dispatches</span>
+            </h3>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('sos-history')}
+              className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1 font-semibold"
+            >
+              <span>View Full History</span>
+              <ArrowRight className="w-3 h-3" />
+            </button>
+          </div>
+
+          {recentSosEvents.length === 0 ? (
+            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 text-center space-y-2">
+              <p className="text-xs text-slate-500">
+                {authToken ? 'No past SOS distress calls recorded on this account.' : 'Sign in to access your secure personal SOS dispatch log.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(authToken ? 'sos' : 'auth')}
+                className="px-3 py-1.5 text-xs font-semibold text-rose-600 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-lg inline-flex items-center gap-1"
+              >
+                <span>{authToken ? 'Test Emergency SOS' : 'Sign In Now'}</span>
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {recentSosEvents.map((evt) => (
+                <div
+                  key={evt.eventId}
+                  onClick={() => setCurrentPage('sos-history')}
+                  className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs space-y-1 cursor-pointer hover:border-indigo-400 transition-colors"
+                >
+                  <div className="flex items-center justify-between font-mono">
+                    <span className="font-bold text-slate-800 dark:text-slate-200">
+                      {evt.emergencyReferenceId}
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                      {evt.overallStatus}
+                    </span>
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-300 line-clamp-1 italic">
+                    "{evt.message}"
+                  </p>
+                  <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                    <span>{new Date(evt.createdAt).toLocaleString()}</span>
+                    <span>{evt.recipients.length} Recipient(s)</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 

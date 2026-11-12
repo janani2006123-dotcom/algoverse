@@ -167,6 +167,20 @@ export const Navbar: React.FC = () => {
             </button>
             <button
               type="button"
+              onClick={() => handleNavClick('emergency-contacts')}
+              className="w-full text-left px-3 py-2 rounded-md text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              Emergency Contacts
+            </button>
+            <button
+              type="button"
+              onClick={() => handleNavClick('sos-history')}
+              className="w-full text-left px-3 py-2 rounded-md text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              SOS Delivery History
+            </button>
+            <button
+              type="button"
               onClick={() => handleNavClick('about')}
               className="w-full text-left px-3 py-2 rounded-md text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
             >
