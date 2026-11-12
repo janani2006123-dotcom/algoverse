@@ -84,6 +84,17 @@ export const Navbar: React.FC = () => {
               <span>SOS</span>
             </button>
 
+            {/* Receiver Siren Monitor Link (For Caregiver / Receiver Device) */}
+            <a
+              href="/?receiver=true"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-800 rounded-lg hover:bg-rose-100 transition-colors whitespace-nowrap shrink-0"
+              title="Open Receiver Emergency Alarm Screen"
+            >
+              <span>🚨 Receiver Monitor</span>
+            </a>
+
             {/* Language Selector */}
             <button
               type="button"

@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import https from 'https';
+import querystring from 'querystring';
 
 dotenv.config();
 
@@ -46,6 +48,123 @@ interface StoredEmergencyAlert {
 
 const emergencyAlerts: StoredEmergencyAlert[] = [];
 
+// ─── SMS Helper via Fast2SMS / Twilio / TextBelt ─────────────────────────
+async function sendSMS(phone: string, message: string): Promise<{ success: boolean; quotaRemaining?: number; error?: string; provider?: string }> {
+  const fast2smsKey = process.env.FAST2SMS_API_KEY;
+  if (fast2smsKey) {
+    return new Promise((resolve) => {
+      const clean10 = phone.replace(/\D/g, '').slice(-10);
+      const postData = querystring.stringify({
+        route: 'v3',
+        sender_id: 'TXTIND',
+        message: message,
+        language: 'english',
+        flash: 0,
+        numbers: clean10,
+      });
+
+      const options = {
+        hostname: 'www.fast2sms.com',
+        port: 443,
+        path: '/dev/bulkV2',
+        method: 'POST',
+        headers: {
+          'authorization': fast2smsKey,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve({ success: parsed.return === true, error: parsed.message?.[0], provider: 'fast2sms' });
+          } catch {
+            resolve({ success: false, error: 'Failed to parse Fast2SMS response', provider: 'fast2sms' });
+          }
+        });
+      });
+
+      req.on('error', (err) => resolve({ success: false, error: err.message, provider: 'fast2sms' }));
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  return new Promise((resolve) => {
+    const textbeltKey = process.env.TEXTBELT_KEY || 'textbelt';
+    const postData = querystring.stringify({ phone, message, key: textbeltKey });
+
+    const options = {
+      hostname: 'textbelt.com',
+      port: 443,
+      path: '/text',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(postData),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve({ success: parsed.success === true, quotaRemaining: parsed.quotaRemaining, error: parsed.error, provider: 'textbelt' });
+        } catch {
+          resolve({ success: false, error: 'Failed to parse SMS response', provider: 'textbelt' });
+        }
+      });
+    });
+
+    req.on('error', (err) => resolve({ success: false, error: err.message, provider: 'textbelt' }));
+    req.write(postData);
+    req.end();
+  });
+}
+
+// ─── Auto-SOS trigger when HELP sign detected ─────────────────────────────
+async function triggerAutoSOS(location?: { latitude: number; longitude: number; address?: string }) {
+  const phone = process.env.EMERGENCY_PHONE;
+  if (!phone || phone === '+91XXXXXXXXXX') {
+    console.warn('[SOS] EMERGENCY_PHONE not configured — skipping SMS');
+    return null;
+  }
+
+  const confirmationCode = `SOS-${Math.floor(100000 + Math.random() * 900000)}`;
+  const baseUrl = process.env.APP_URL && process.env.APP_URL !== 'MY_APP_URL' ? process.env.APP_URL : 'http://localhost:3000';
+  const alarmUrl = `${baseUrl}/?receiver=true&code=${confirmationCode}`;
+
+  const message = `🚨 EMERGENCY SOS — HELP sign detected via SignBridge!\nLocation: ${
+    location?.address || `Lat ${location?.latitude}, Long ${location?.longitude}` || 'Live Camera Location'
+  }\nCode: ${confirmationCode}\nTAP LINK TO SOUND ALARM ON YOUR DEVICE: ${alarmUrl}\nPlease respond immediately.`;
+
+  const smsResult = await sendSMS(phone, message);
+  console.log(`[SOS] SMS to ${phone}:`, smsResult);
+
+  const alert: StoredEmergencyAlert = {
+    id: `auto-sos-${Date.now()}`,
+    type: 'help-sign-detected',
+    message: 'HELP sign detected via camera — auto SOS triggered',
+    urgency: 'critical',
+    status: smsResult.success ? 'Delivered' : 'Failed',
+    timestamp: new Date().toISOString(),
+    location: location || { latitude: 0, longitude: 0, address: 'Live Camera Location' },
+    contactsNotified: [phone],
+    confirmationCode,
+  };
+
+  emergencyAlerts.unshift(alert);
+  if (emergencyAlerts.length > 50) emergencyAlerts.pop();
+
+  return { alert, smsResult, alarmUrl };
+}
+
 // Default gesture presets for fallback simulation
 const GESTURE_PRESETS: Record<string, { sign: string; english: string; grammar: string; handshape: string }> = {
   'hello': { sign: 'HELLO', english: 'Hello, good to see you.', grammar: 'Isolated Salutation', handshape: 'Open-B hand at temple' },
@@ -64,7 +183,7 @@ const GESTURE_PRESETS: Record<string, { sign: string; english: string; grammar: 
 
 /**
  * POST /api/gemini/interpret-sign
- * Analyzes video frame or landmark features using Gemini or fallback simulator
+ * Analyzes video frame or landmark features using Gemini 2.5 Pro or fallback simulator
  */
 app.post('/api/gemini/interpret-sign', async (req: Request, res: Response) => {
   try {
@@ -94,25 +213,28 @@ Return ONLY a clean JSON object without markdown formatting:
 }`;
 
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('AI timeout')), 6000)
+          setTimeout(() => reject(new Error('AI timeout')), 15000)
         );
 
         const response: any = await Promise.race([
           ai.models.generateContent({
             model: 'gemini-3.8-flash',
-            contents: {
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: 'image/jpeg',
-                    data: cleanBase64,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/jpeg',
+                      data: cleanBase64,
+                    },
                   },
-                },
-                {
-                  text: prompt,
-                },
-              ],
-            },
+                  {
+                    text: prompt,
+                  },
+                ],
+              },
+            ],
           }),
           timeoutPromise,
         ]);
@@ -121,10 +243,29 @@ Return ONLY a clean JSON object without markdown formatting:
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
+
+          // Auto-SOS: if Gemini detected HELP sign, trigger SMS
+          let sosTriggered = false;
+          let sosAlert = null;
+          let smsSent = false;
+          const recognizedSign = (parsed.recognizedSign || '').toUpperCase();
+          if (recognizedSign.includes('HELP') || recognizedSign.includes('SOS') || recognizedSign.includes('EMERGENCY')) {
+            const sosResult = await triggerAutoSOS(req.body.location);
+            if (sosResult) {
+              sosTriggered = true;
+              sosAlert = sosResult.alert;
+              smsSent = sosResult.smsResult.success;
+              console.log('[SOS] Auto-SOS triggered from Gemini HELP detection');
+            }
+          }
+
           return res.json({
             ...parsed,
             isDemo: false,
             timestamp: new Date().toISOString(),
+            sosTriggered,
+            sosAlert,
+            smsSent,
           });
         }
       } catch (geminiErr: any) {
@@ -139,7 +280,7 @@ Return ONLY a clean JSON object without markdown formatting:
 
     const preset = GESTURE_PRESETS[selectedKey] || GESTURE_PRESETS['hello'];
 
-    return res.json({
+    const fallbackResult = {
       recognizedSign: preset.sign,
       confidence: 0.88 + Math.round(Math.random() * 9) / 100,
       sentence: preset.english,
@@ -149,7 +290,23 @@ Return ONLY a clean JSON object without markdown formatting:
       facialCueDetected: 'Neutral gaze with slight affirmative head nod',
       isDemo: true,
       timestamp: new Date().toISOString(),
-    });
+      sosTriggered: false,
+    };
+
+    // Auto-SOS: if HELP sign detected, trigger SMS alert
+    if (selectedKey === 'help' || (gestureHint && gestureHint.toLowerCase().includes('help'))) {
+      const sosResult = await triggerAutoSOS(req.body.location);
+      if (sosResult) {
+        return res.json({
+          ...fallbackResult,
+          sosTriggered: true,
+          sosAlert: sosResult.alert,
+          smsSent: sosResult.smsResult.success,
+        });
+      }
+    }
+
+    return res.json(fallbackResult);
   } catch (error: any) {
     console.error('Error in interpret-sign:', error);
     return res.status(500).json({ error: 'Failed to interpret sign gesture' });
@@ -200,13 +357,18 @@ Return ONLY a valid JSON object without markdown formatting:
 }`;
 
         const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('AI timeout')), 6000)
+          setTimeout(() => reject(new Error('AI timeout')), 7000)
         );
 
         const response: any = await Promise.race([
           ai.models.generateContent({
             model: 'gemini-3.8-flash',
-            contents: prompt,
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }],
+              },
+            ],
             config: {
               responseMimeType: 'application/json',
             },
@@ -215,9 +377,16 @@ Return ONLY a valid JSON object without markdown formatting:
         ]);
 
         const rawText = (response.text ?? '').trim();
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
+        // Try direct parse first (since we requested JSON mime type)
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(rawText);
+        } catch {
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+        }
+
+        if (parsed) {
           return res.json({
             ...parsed,
             isDemo: false,
@@ -299,10 +468,62 @@ Return ONLY a valid JSON object without markdown formatting:
 });
 
 /**
- * POST /api/emergency/dispatch
- * Handles accessible SOS alert dispatch, location telemetry, and simulated SMS confirmation
+ * POST /api/emergency/sms
+ * Send a custom SMS to the emergency contact number and log the SOS alert
  */
-app.post('/api/emergency/dispatch', (req: Request, res: Response) => {
+app.post('/api/emergency/sms', async (req: Request, res: Response) => {
+  try {
+    const { phone, message, location } = req.body;
+    const targetPhone = phone || process.env.EMERGENCY_PHONE;
+
+    if (!targetPhone || targetPhone === '+91XXXXXXXXXX') {
+      return res.status(400).json({ error: 'No emergency phone number configured. Set EMERGENCY_PHONE in .env or provide phone in request.' });
+    }
+    if (!message) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const smsResult = await sendSMS(targetPhone, message);
+    const confirmationCode = `SOS-${Math.floor(100000 + Math.random() * 900000)}`;
+    const newAlert: StoredEmergencyAlert = {
+      id: `auto-sos-${Date.now()}`,
+      type: 'help-sign-detected',
+      message,
+      urgency: 'critical',
+      status: smsResult.success ? 'Delivered' : 'Sent',
+      timestamp: new Date().toISOString(),
+      location: location || {
+        latitude: 0,
+        longitude: 0,
+        address: 'Live Sign Detection Location',
+      },
+      contactsNotified: [targetPhone],
+      confirmationCode,
+    };
+
+    emergencyAlerts.unshift(newAlert);
+    if (emergencyAlerts.length > 50) emergencyAlerts.pop();
+
+    return res.json({
+      success: smsResult.success,
+      smsSent: smsResult.success,
+      phone: targetPhone,
+      alert: newAlert,
+      confirmationCode,
+      quotaRemaining: smsResult.quotaRemaining,
+      error: smsResult.error,
+    });
+  } catch (err: any) {
+    console.error('Error sending SMS:', err);
+    return res.status(500).json({ error: 'Failed to send SMS' });
+  }
+});
+
+/**
+ * POST /api/emergency/dispatch
+ * Handles accessible SOS alert dispatch, location telemetry, and real SMS sending
+ */
+app.post('/api/emergency/dispatch', async (req: Request, res: Response) => {
   try {
     const { type = 'general', message, location, contacts = [] } = req.body;
 
@@ -311,6 +532,25 @@ app.post('/api/emergency/dispatch', (req: Request, res: Response) => {
     }
 
     const confirmationCode = `SOS-${Math.floor(100000 + Math.random() * 900000)}`;
+    const envPhone = process.env.EMERGENCY_PHONE;
+    const smsText = `🚨 EMERGENCY SOS (${type.toUpperCase()}): ${message}\nLocation: ${
+      location?.address || (location ? `Lat ${location.latitude}, Long ${location.longitude}` : 'Unknown')
+    }\nCode: ${confirmationCode}`;
+
+    let smsSent = false;
+    let smsError: string | undefined;
+    if (envPhone && envPhone !== '+91XXXXXXXXXX') {
+      const smsRes = await sendSMS(envPhone, smsText);
+      smsSent = smsRes.success;
+      smsError = smsRes.error;
+      console.log(`[SOS] Dispatch SMS to ${envPhone}:`, smsRes);
+    }
+
+    const notifiedList = contacts.map((c: any) => c.name || c.phone || 'Primary Contact');
+    if (envPhone && envPhone !== '+91XXXXXXXXXX' && !notifiedList.includes(envPhone)) {
+      notifiedList.unshift(envPhone);
+    }
+
     const newAlert: StoredEmergencyAlert = {
       id: `alert-${Date.now()}`,
       type,
@@ -323,7 +563,7 @@ app.post('/api/emergency/dispatch', (req: Request, res: Response) => {
         longitude: -122.4194,
         address: 'San Francisco, CA (Simulated Geolocation)',
       },
-      contactsNotified: contacts.map((c: any) => c.name || c.phone || 'Primary Contact'),
+      contactsNotified: notifiedList,
       confirmationCode,
     };
 
@@ -333,8 +573,12 @@ app.post('/api/emergency/dispatch', (req: Request, res: Response) => {
     return res.json({
       success: true,
       alert: newAlert,
+      smsSent,
+      smsError,
       deliveryStatus: 'Delivered',
-      message: 'Emergency notification dispatched to designated contacts and local relays.',
+      message: smsSent
+        ? `Emergency SMS dispatched to ${envPhone} and registered contacts.`
+        : 'Emergency notification dispatched to designated contacts and local relays.',
       deliveredAt: newAlert.timestamp,
       confirmationCode,
     });
@@ -349,6 +593,29 @@ app.post('/api/emergency/dispatch', (req: Request, res: Response) => {
  */
 app.get('/api/emergency/history', (_req: Request, res: Response) => {
   return res.json({ alerts: emergencyAlerts });
+});
+
+/**
+ * GET /api/emergency/latest
+ */
+app.get('/api/emergency/latest', (_req: Request, res: Response) => {
+  const latest = emergencyAlerts[0] || null;
+  return res.json({ alert: latest });
+});
+
+/**
+ * POST /api/emergency/acknowledge
+ */
+app.post('/api/emergency/acknowledge', (req: Request, res: Response) => {
+  const { id, confirmationCode } = req.body;
+  const target = emergencyAlerts.find(
+    (a) => (id && a.id === id) || (confirmationCode && a.confirmationCode === confirmationCode)
+  );
+  if (target) {
+    target.status = 'Delivered';
+    return res.json({ success: true, alert: target });
+  }
+  return res.json({ success: false, message: 'Alert not found' });
 });
 
 /**

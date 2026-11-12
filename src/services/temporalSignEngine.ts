@@ -177,18 +177,38 @@ export class TemporalSignEngine {
     // Two-hand detection for ISL signs
     const isTwoHanded = latest.landmarks.length >= 2 && oldest.landmarks.length >= 2;
 
+    // 0. Universal Emergency Signal for Help (Hand open then closed into fist, or static fist held in distress)
+    const pastAllCurled = !pastHand[8] || pastHand[8].y > pastHand[6].y;
+    const currentAllCurled = !isIndexExtended && !isMiddleExtended && !isRingExtended && !isPinkyExtended;
+    const transitionToFist = pastHand[8] && pastHand[8].y < pastHand[6].y && currentAllCurled;
+
+    if (transitionToFist || (currentAllCurled && isThumbExtended && Math.abs(wristDy) > 0.04)) {
+      this.lastTriggeredSign = 'HELP';
+      this.lastTriggerTimestamp = currentTimestamp;
+      return {
+        signName: 'HELP (Universal Distress Sign)',
+        mappedText: 'HELP! Emergency assistance needed.',
+        confidence: 0.95,
+        signType: 'one-hand-dynamic',
+        motionTrajectory: 'Universal Distress Hand Signal',
+        handOrientation: 'Closed Fist Distress Signal',
+        temporalConfidence: 0.95,
+        isHeuristicModel: true,
+      };
+    }
+
     // 1. ISL "HELP" (Lift motion: dominant hand lifting or supporting hand)
-    if (wristDy < -0.12 && isThumbExtended && (!isRingExtended || isTwoHanded)) {
+    if ((wristDy < -0.09 && (!isRingExtended || isTwoHanded)) || (wristDy < -0.12 && isThumbExtended)) {
       this.lastTriggeredSign = 'HELP';
       this.lastTriggerTimestamp = currentTimestamp;
       return {
         signName: 'HELP (Lift Trajectory)',
         mappedText: 'I need help / Please assist me.',
-        confidence: 0.88,
+        confidence: 0.91,
         signType: isTwoHanded ? 'two-hand-dynamic' : 'one-hand-dynamic',
         motionTrajectory: 'Upward Elevation',
         handOrientation: 'Ascending Support Plane',
-        temporalConfidence: 0.89,
+        temporalConfidence: 0.91,
         isHeuristicModel: true,
       };
     }

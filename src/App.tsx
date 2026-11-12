@@ -21,11 +21,23 @@ import { ProfilePage } from './pages/ProfilePage';
 import { AccessibilityPage } from './pages/AccessibilityPage';
 import { AboutPage } from './pages/AboutPage';
 import { AuthPage } from './pages/AuthPage';
+import { ReceiverSosPage } from './pages/ReceiverSosPage';
 
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 const AppContent: React.FC = () => {
   const { currentPage, toast } = useApp();
+
+  const isReceiverMode =
+    typeof window !== 'undefined' &&
+    (window.location.search.includes('receiver') ||
+      window.location.search.includes('code=SOS') ||
+      window.location.hash.includes('receiver') ||
+      currentPage === 'receiver');
+
+  if (isReceiverMode) {
+    return <ReceiverSosPage />;
+  }
 
   const renderCurrentPage = () => {
     switch (currentPage) {
@@ -39,6 +51,8 @@ const AppContent: React.FC = () => {
         return <LiveCommunicationPage />;
       case 'sos':
         return <SosPage />;
+      case 'receiver':
+        return <ReceiverSosPage />;
       case 'learn':
         return <LearnPage />;
       case 'dictionary':

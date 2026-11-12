@@ -42,6 +42,7 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
 
   const recognitionRef = useRef<any>(null);
   const sequenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const translateFnRef = useRef<(overrideText?: string, overrideLang?: SignLanguageType) => void>(() => {});
 
   // Initialize SpeechRecognition
   useEffect(() => {
@@ -66,12 +67,19 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
 
       recognition.onresult = (event: any) => {
         let transcript = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
+        let hasFinal = false;
+        for (let i = 0; i < event.results.length; ++i) {
           transcript += event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            hasFinal = true;
+          }
         }
         if (transcript.trim()) {
-          setSpokenText(transcript);
+          setSpokenText(transcript.trim());
           setError('');
+          if (hasFinal) {
+            translateFnRef.current(transcript.trim());
+          }
         }
       };
 
@@ -81,6 +89,9 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
         if (event.error === 'not-allowed') {
           setError('Microphone permission was denied. You can type directly in the text field.');
           showToast('Microphone permission denied.', 'error');
+        } else if (event.error === 'network') {
+          setError('Browser speech recognition network error. You can type directly in the text box below.');
+          showToast('Speech recognition network error — type text instead.', 'info');
         } else if (event.error !== 'no-speech') {
           showToast(`Speech error: ${event.error}`, 'info');
         }
@@ -191,6 +202,8 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
     }
   };
 
+  translateFnRef.current = translateMessage;
+
   // Run initial translation on mount
   useEffect(() => {
     if (spokenText.trim()) {
@@ -234,7 +247,12 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
     const cleanGloss = entry.gloss.toUpperCase();
     const targetWord = (activeToken?.word || activeGlossWord).toLowerCase().replace(/[^a-z]/g, '');
     const targetGloss = activeGlossWord.replace(/[^A-Z]/g, '');
-    return cleanGloss === targetGloss || cleanWord === targetWord || cleanWord.includes(targetWord) || targetWord.includes(cleanWord);
+    if (!targetWord && !targetGloss) return false;
+    return (
+      (targetGloss && cleanGloss === targetGloss) ||
+      (targetWord && cleanWord === targetWord) ||
+      (targetWord.length >= 3 && (cleanWord.includes(targetWord) || targetWord.includes(cleanWord)))
+    );
   });
 
   // Generate responsive kinematic frames if not in static dictionary

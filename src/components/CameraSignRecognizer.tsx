@@ -20,6 +20,7 @@ import {
   Clock,
   Layers,
   Info,
+  ShieldAlert,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { SignToVoiceResult } from '../types';
@@ -48,7 +49,7 @@ export interface GestureMapping {
 
 export const DEFAULT_GESTURE_MAPPINGS: GestureMapping[] = [
   { gestureId: 'Open_Palm', gestureName: 'Open Palm', mappedText: 'Hello / Stop', description: 'Flat open hand showing 5 extended fingers' },
-  { gestureId: 'Closed_Fist', gestureName: 'Closed Fist', mappedText: 'Hold / Ready', description: 'All fingers curled firmly into palm' },
+  { gestureId: 'Closed_Fist', gestureName: 'Closed Fist (Distress)', mappedText: 'HELP / Emergency Assistance Needed!', description: 'Fist held up — triggers emergency SOS alert' },
   { gestureId: 'Thumb_Up', gestureName: 'Thumb Up', mappedText: 'Good / Yes / Approve', description: 'Fist with upright extended thumb' },
   { gestureId: 'Thumb_Down', gestureName: 'Thumb Down', mappedText: 'No / Bad / Disapprove', description: 'Fist with downward pointing thumb' },
   { gestureId: 'Victory', gestureName: 'Victory / Peace', mappedText: 'Peace / Two / Victory', description: 'V-sign with extended index and middle fingers' },
@@ -60,7 +61,17 @@ export const CameraSignRecognizer: React.FC<CameraSignRecognizerProps> = ({
   onRecognized,
   compact = false,
 }) => {
-  const { preferences, speakText, isSpeaking, stopSpeaking, addTranslationRecord, showToast } = useApp();
+  const {
+    preferences,
+    speakText,
+    isSpeaking,
+    stopSpeaking,
+    addTranslationRecord,
+    addAlert,
+    emergencyContacts,
+    setCurrentPage,
+    showToast,
+  } = useApp();
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -107,6 +118,140 @@ export const CameraSignRecognizer: React.FC<CameraSignRecognizerProps> = ({
   const [validationError, setValidationError] = useState<string>('');
   const [selectedPreset, setSelectedPreset] = useState<string>('hello');
   const [isAnalyzingPreset, setIsAnalyzingPreset] = useState<boolean>(false);
+
+  // SOS state
+  const [sosTriggered, setSosTriggered] = useState(false);
+  const [sosMessage, setSosMessage] = useState<string | null>(null);
+  const [isSirenActive, setIsSirenActive] = useState(false);
+  const [sosLinks, setSosLinks] = useState<{ whatsapp: string; sms: string } | null>(null);
+  const sosCooldownRef = useRef<number>(0); // prevent duplicate SOS within 40s
+  const sirenAudioCtxRef = useRef<AudioContext | null>(null);
+  const sirenOscRef = useRef<OscillatorNode | null>(null);
+
+  // Audible emergency siren alarm synthesizer (European / Police dual-tone oscillator)
+  const startSiren = useCallback(() => {
+    try {
+      if (sirenAudioCtxRef.current) {
+        try { sirenAudioCtxRef.current.close(); } catch {}
+      }
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sawtooth';
+      const now = ctx.currentTime;
+      // Oscillating emergency siren frequencies for 20 seconds
+      for (let i = 0; i < 25; i++) {
+        osc.frequency.setValueAtTime(900, now + i * 0.8);
+        osc.frequency.exponentialRampToValueAtTime(450, now + i * 0.8 + 0.4);
+        osc.frequency.exponentialRampToValueAtTime(900, now + i * 0.8 + 0.8);
+      }
+
+      gain.gain.setValueAtTime(0.5, now);
+      gain.gain.setValueAtTime(0.5, now + 19.5);
+      gain.gain.linearRampToValueAtTime(0.01, now + 20.0);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + 20.0);
+
+      sirenAudioCtxRef.current = ctx;
+      sirenOscRef.current = osc;
+      setIsSirenActive(true);
+    } catch (e) {
+      console.warn('Audio siren error:', e);
+    }
+  }, []);
+
+  const stopSiren = useCallback(() => {
+    try {
+      if (sirenOscRef.current) {
+        sirenOscRef.current.stop();
+        sirenOscRef.current.disconnect();
+      }
+      if (sirenAudioCtxRef.current) {
+        sirenAudioCtxRef.current.close();
+      }
+    } catch {}
+    sirenAudioCtxRef.current = null;
+    sirenOscRef.current = null;
+    setIsSirenActive(false);
+  }, []);
+
+  // SOS trigger when HELP sign is detected
+  const triggerSOS = useCallback(async () => {
+    const now = Date.now();
+    if (now < sosCooldownRef.current) return; // already triggered recently
+    sosCooldownRef.current = now + 40000; // 40s cooldown
+
+    // 1. Immediately sound the emergency siren alarm
+    startSiren();
+
+    const targetPhone = '+919916693919';
+    const cleanNumber = '919916693919';
+    setSosTriggered(true);
+    setSosMessage('🚨 HELP SIGN DETECTED! SOS ENABLED & SIREN ACTIVATED!');
+    showToast('🚨 HELP sign detected! Siren activated and SOS dispatched!', 'error');
+
+    // Prepare direct instant dispatch links for WhatsApp and Native SMS
+    const receiverLink = `${window.location.origin}/?receiver=true`;
+    const defaultMsg = `EMERGENCY SOS: Help sign detected on SignBridge camera! Tap link to sound alarm & see location: ${receiverLink}`;
+    const waUrl = `https://api.whatsapp.com/send?phone=${cleanNumber}&text=${encodeURIComponent('🚨 ' + defaultMsg)}`;
+    const smsUrl = `sms:${targetPhone}?&body=${encodeURIComponent('🚨 ' + defaultMsg)}`;
+    setSosLinks({ whatsapp: waUrl, sms: smsUrl });
+
+    // Open WhatsApp directly in a new window/tab to ensure instant message delivery
+    try {
+      const waWin = window.open(waUrl, '_blank');
+      if (!waWin) {
+        console.log('Popup blocked, links available in banner');
+      }
+    } catch {}
+
+    try {
+      const location = await new Promise<{ latitude: number; longitude: number; address?: string } | undefined>((resolve) => {
+        if (!navigator.geolocation) return resolve(undefined);
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, address: `Lat: ${pos.coords.latitude.toFixed(4)}, Long: ${pos.coords.longitude.toFixed(4)}` }),
+          () => resolve(undefined),
+          { timeout: 4000 }
+        );
+      });
+
+      const updatedMsg = `🚨 SOS ALERT — HELP sign detected via SignBridge camera!\nLocation: ${location?.address || 'Live Camera Location'}\nTap to sound receiver alarm: ${receiverLink}\nPlease respond immediately.`;
+      const updatedWa = `https://api.whatsapp.com/send?phone=${cleanNumber}&text=${encodeURIComponent(updatedMsg)}`;
+      const updatedSms = `sms:${targetPhone}?&body=${encodeURIComponent(updatedMsg)}`;
+      setSosLinks({ whatsapp: updatedWa, sms: updatedSms });
+
+      const res = await fetch('/api/emergency/sms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: targetPhone,
+          message: updatedMsg,
+          location,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.alert) {
+        addAlert(data.alert);
+      }
+
+      if (data.success || data.smsSent) {
+        setSosMessage(`✅ SOS Dispatched & SMS Sent to ${targetPhone}! (Ref: ${data.confirmationCode || 'SOS'})`);
+        showToast(`✅ Emergency SMS sent to ${targetPhone}!`, 'success');
+      } else {
+        setSosMessage(`🚨 SOS Active! Siren sounding. Direct WhatsApp & SMS ready for ${targetPhone} (Ref: ${data.confirmationCode || 'SOS'})`);
+        showToast('🚨 SOS Active! Tap WhatsApp button to deliver directly.', 'info');
+      }
+    } catch {
+      setSosMessage(`🚨 SOS Active! Siren sounding. Use WhatsApp / SMS button for ${targetPhone}.`);
+    }
+  }, [startSiren, addAlert, showToast]);
 
   // Save gesture mappings to localStorage
   const handleUpdateMapping = (gestureId: string, newText: string) => {
@@ -237,7 +382,19 @@ export const CameraSignRecognizer: React.FC<CameraSignRecognizerProps> = ({
     }
 
     showToast(`Recognized: ${gestureName} → "${phrase}"`, 'success');
-  }, [gestureMappings, preferences.preferredSignLanguage, onRecognized, addTranslationRecord, showToast]);
+
+    // Auto-enable SOS and send SMS when HELP sign or Closed Fist is detected
+    if (
+      gestureName.toUpperCase().includes('HELP') ||
+      phrase.toUpperCase().includes('HELP') ||
+      gestureName === 'Closed_Fist' ||
+      phrase.toUpperCase().includes('ASSIST') ||
+      phrase.toUpperCase().includes('SOS') ||
+      phrase.toUpperCase().includes('EMERGENCY')
+    ) {
+      triggerSOS();
+    }
+  }, [gestureMappings, preferences.preferredSignLanguage, onRecognized, addTranslationRecord, showToast, triggerSOS]);
 
   // Step 5: High-speed RAF continuous frame processing and landmark rendering
   const processFrame = useCallback(() => {
@@ -489,6 +646,24 @@ export const CameraSignRecognizer: React.FC<CameraSignRecognizerProps> = ({
       }
 
       showToast(`Preset: ${data.recognizedSign}`, 'success');
+
+      // If preset / backend triggered SOS for HELP sign
+      const anyData = data as any;
+      if (anyData.sosTriggered) {
+        if (anyData.sosAlert) {
+          addAlert(anyData.sosAlert);
+        }
+        setSosTriggered(true);
+        setSosMessage(
+          anyData.smsSent
+            ? `✅ HELP sign detected! SOS Enabled & SMS sent to +919916693919 (Ref: ${anyData.sosAlert?.confirmationCode || 'SOS'})`
+            : `🚨 HELP sign detected! SOS Enabled & alert logged (Ref: ${anyData.sosAlert?.confirmationCode || 'SOS'})`
+        );
+        showToast('🚨 HELP sign detected! SOS Enabled!', 'error');
+        setTimeout(() => { setSosTriggered(false); setSosMessage(null); }, 20000);
+      } else if (presetId === 'help' || (data.recognizedSign || '').toUpperCase().includes('HELP')) {
+        triggerSOS();
+      }
     } catch (err) {
       console.error('Preset analysis error:', err);
       showToast('Could not analyze preset gesture.', 'error');
@@ -569,6 +744,84 @@ export const CameraSignRecognizer: React.FC<CameraSignRecognizerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* SOS Emergency Auto-Trigger Banner */}
+      {sosTriggered && (
+        <div className="px-5 py-3.5 bg-gradient-to-r from-rose-600 via-rose-700 to-red-800 text-white flex flex-wrap items-center justify-between gap-3 shadow-lg border-b-2 border-red-400 animate-in fade-in">
+          <div className="flex items-center gap-3 text-xs sm:text-sm font-bold">
+            <div className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center animate-bounce shrink-0">
+              <ShieldAlert className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="bg-white text-rose-700 px-2 py-0.5 rounded text-[11px] font-extrabold uppercase tracking-wide">
+                  Emergency Triggered
+                </span>
+                {isSirenActive && (
+                  <span className="flex items-center gap-1 bg-amber-400 text-slate-950 px-2 py-0.5 rounded text-[11px] font-bold animate-pulse">
+                    🔊 Siren Active
+                  </span>
+                )}
+              </div>
+              <p className="text-xs sm:text-sm font-semibold text-rose-50 mt-0.5">
+                {sosMessage || '🚨 HELP sign detected! SOS Enabled and emergency alert activated.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {isSirenActive && (
+              <button
+                type="button"
+                onClick={stopSiren}
+                className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+              >
+                <span>Silence Siren</span>
+              </button>
+            )}
+
+            {sosLinks?.whatsapp && (
+              <a
+                href={sosLinks.whatsapp}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-white text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+              >
+                <span>📲 Open WhatsApp (+919916693919)</span>
+              </a>
+            )}
+
+            {sosLinks?.sms && (
+              <a
+                href={sosLinks.sms}
+                className="px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+              >
+                <span>💬 Native SMS</span>
+              </a>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setCurrentPage('sos')}
+              className="px-3 py-1.5 rounded-xl bg-white text-rose-700 text-xs font-extrabold hover:bg-rose-50 transition-colors shadow-sm"
+            >
+              Open SOS Panel
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                stopSiren();
+                setSosTriggered(false);
+                setSosMessage(null);
+              }}
+              className="px-2.5 py-1.5 rounded-xl bg-rose-900/80 hover:bg-rose-900 text-white text-xs font-semibold transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Stage Grid */}
       <div className="p-5 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

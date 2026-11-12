@@ -77,9 +77,9 @@ const DEFAULT_USER: UserProfile = {
   emergencyContacts: [
     {
       id: 'contact-1',
-      name: 'Sarah Rivera (Spouse)',
-      phone: '+1 (555) 234-5678',
-      relation: 'Spouse',
+      name: 'Primary SOS Contact',
+      phone: '+919916693919',
+      relation: 'Emergency Contact',
       notifySms: true,
       notifyCall: true,
     },
