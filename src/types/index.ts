@@ -64,28 +64,84 @@ export interface SignToVoiceResult {
   facialCueDetected?: string;
 }
 
+export interface GlossToken {
+  word: string;
+  gloss: string;
+  handshape: string;
+  expression: string;
+  durationMs: number;
+}
+
 export interface VoiceToSignResult {
   spokenText: string;
   signLanguage: SignLanguageType;
-  glossSequence: Array<{
-    word: string;
-    gloss: string;
-    handshape: string;
-    expression: string;
-    durationMs: number;
-  }>;
+  glossSequence: GlossToken[];
   grammarNotes: string[];
   isDemo: boolean;
-  avatarFrames: SignAvatarKeyframe[];
+  avatarFrames?: SignAvatarKeyframe[];
 }
 
 export interface EmergencyContact {
   id: string;
+  uid?: string;
   name: string;
   phone: string;
   relation: string;
   notifySms: boolean;
   notifyCall: boolean;
+  isPreferred?: boolean;
+  notificationConsent?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface UserAccount {
+  uid: string;
+  email: string;
+  fullName: string;
+  phoneNumber: string;
+  role: 'signer' | 'speaker' | 'both' | 'learner';
+  createdAt: string;
+  avatarUrl?: string;
+  emergencyPreferences?: {
+    notifySms?: boolean;
+    notifyCall?: boolean;
+    autoAttachLocation?: boolean;
+    customDiscloseNote?: string;
+  };
+}
+
+export interface SosRecipientRecord {
+  recipientId: string;
+  eventId: string;
+  uid: string;
+  contactId?: string;
+  recipientName: string;
+  recipientPhone: string;
+  wamid: string | null;
+  deliveryStatus: WhatsAppDeliveryStatus;
+  errorInformation?: string | null;
+  sentAt: string;
+  updatedAt: string;
+  webhookHistory?: Array<{
+    status: string;
+    timestamp: string;
+    raw?: any;
+  }>;
+}
+
+export interface SosEventRecord {
+  eventId: string;
+  uid: string;
+  emergencyReferenceId: string;
+  message: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  locationAddress?: string | null;
+  userConsent: boolean;
+  createdAt: string;
+  overallStatus: WhatsAppDeliveryStatus;
+  recipients: SosRecipientRecord[];
 }
 
 export interface EmergencyAlert {
@@ -104,6 +160,47 @@ export interface EmergencyAlert {
   contactsNotified: string[];
   dispatchNote?: string;
   confirmationCode?: string;
+}
+
+export type WhatsAppDeliveryStatus =
+  | 'PENDING'
+  | 'SENDING'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'READ'
+  | 'FAILED'
+  | 'UNKNOWN';
+
+export interface WhatsAppSosRecord {
+  internalMessageId: string;
+  emergencyReferenceId: string;
+  recipientPhone: string;
+  recipientName?: string;
+  messageContent: string;
+  wamid: string | null;
+  sendingTimestamp: string;
+  currentDeliveryStatus: WhatsAppDeliveryStatus;
+  errorInformation?: string | null;
+  latestStatusUpdateTimestamp: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  userConsent: boolean;
+  webhookHistory?: Array<{
+    status: string;
+    timestamp: string;
+    raw?: any;
+  }>;
+}
+
+export interface WhatsAppConfigStatus {
+  hasPhoneNumberId: boolean;
+  hasAccessToken: boolean;
+  hasVerifyToken: boolean;
+  hasAppSecret: boolean;
+  apiVersion: string;
+  webhookUrl: string;
+  readyToSend: boolean;
+  missing?: string[];
 }
 
 export interface ConversationMessage {

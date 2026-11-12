@@ -1,0 +1,35 @@
+[
+  {
+    "internalMessageId": "msg-1794477086812-6sqlgl",
+    "emergencyReferenceId": "SOS-413845",
+    "recipientPhone": "15550192834",
+    "recipientName": "Sarah Rivera",
+    "messageContent": "Medical emergency, please send help",
+    "wamid": "wamid.HBgLSIMULATED_msg-1794477086812-6sqlgl",
+    "sendingTimestamp": "2026-11-12T09:51:26.812Z",
+    "currentDeliveryStatus": "READ",
+    "errorInformation": "Meta WhatsApp Cloud API credentials not configured in server environment. Missing: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN.",
+    "latestStatusUpdateTimestamp": "2026-11-12T09:53:37.216Z",
+    "latitude": 37.7749,
+    "longitude": -122.4194,
+    "userConsent": true,
+    "webhookHistory": [
+      {
+        "status": "DELIVERED",
+        "timestamp": "2026-11-12T09:53:26.206Z",
+        "raw": {
+          "simulated": true,
+          "triggerTime": "2026-11-12T09:53:26.205Z"
+        }
+      },
+      {
+        "status": "READ",
+        "timestamp": "2026-11-12T09:53:37.216Z",
+        "raw": {
+          "simulated": true,
+          "triggerTime": "2026-11-12T09:53:37.216Z"
+        }
+      }
+    ]
+  }
+]

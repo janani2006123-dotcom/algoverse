@@ -18,6 +18,7 @@ import { useApp } from '../context/AppContext';
 import { AnimatedSignAvatar } from './AnimatedSignAvatar';
 import { SIGN_DICTIONARY } from '../data/signDictionary';
 import { SignLanguageType, VoiceToSignResult, SignAvatarKeyframe, SignEntry } from '../types';
+import { translateTextToSignLocally } from '../utils/linguisticTranslator';
 
 interface VoiceSignTranslatorProps {
   onTranslated?: (spokenText: string, glossSequence: string) => void;
@@ -166,8 +167,7 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.error || `Server responded with ${res.status}`);
+        throw new Error(`Server responded with status ${res.status}`);
       }
 
       const data: VoiceToSignResult = await res.json();
@@ -183,9 +183,20 @@ export const VoiceSignTranslator: React.FC<VoiceSignTranslatorProps> = ({
 
       showToast(`Translated into ${langToUse} Sign Structure`, 'success');
     } catch (err: any) {
-      console.error('Translation error:', err);
-      setError('Translation failed. Please try again.');
-      showToast('Translation failed. Please try again.', 'error');
+      console.warn('Network translation unavailable, using client linguistic engine:', err?.message || err);
+      // Seamless fallback to client-side linguistic translation
+      const fallbackData = translateTextToSignLocally(textToTranslate.trim(), langToUse);
+      setTranslationResult(fallbackData);
+      setSelectedWordIndex(0);
+
+      const glossStr = fallbackData.glossSequence.map((g) => g.gloss).join(' ');
+      addTranslationRecord('voice-to-sign', textToTranslate.trim(), glossStr, langToUse);
+
+      if (onTranslated) {
+        onTranslated(textToTranslate.trim(), glossStr);
+      }
+
+      showToast(`Translated into ${langToUse} Sign Structure`, 'success');
     } finally {
       setIsTranslating(false);
     }

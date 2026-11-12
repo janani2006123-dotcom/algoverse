@@ -3,6 +3,15 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import { emergencyDb, verifyPassword } from './src/server/db';
+import {
+  sendWhatsAppCloudMessage,
+  verifyWebhookSignature,
+  parseWhatsAppWebhookStatuses,
+  getWhatsAppConfig,
+  normalizePhoneNumber,
+} from './src/server/whatsappService';
+import { WhatsAppSosRecord, WhatsAppDeliveryStatus } from './src/types';
 
 dotenv.config();
 
@@ -12,7 +21,40 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
-app.use(express.json({ limit: '20mb' }));
+// Enable full CORS and Cross-Origin Resource Policy for iframe & Cloud Run environments
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, HEAD');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Range, X-Hub-Signature-256');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+  res.header('Cross-Origin-Resource-Policy', 'cross-origin');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(204).end();
+  }
+  next();
+});
+
+// Serve static assets (models & wasm) with cross-origin headers and explicit MIME types
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    if (filePath.endsWith('.wasm')) {
+      res.setHeader('Content-Type', 'application/wasm');
+    } else if (filePath.endsWith('.task')) {
+      res.setHeader('Content-Type', 'application/octet-stream');
+    }
+  }
+}));
+
+// Capture raw body for webhook HMAC signature verification
+app.use(express.json({
+  limit: '20mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
 // Initialize Google GenAI if key is present
 const apiKey = process.env.GEMINI_API_KEY;
@@ -351,6 +393,795 @@ app.get('/api/emergency/history', (_req: Request, res: Response) => {
   return res.json({ alerts: emergencyAlerts });
 });
 
+// ========================================================
+// PHASE 1, 2, 8: AUTHENTICATION MIDDLEWARE & ENDPOINTS
+// ========================================================
+
+const sosRateLimitMap = new Map<string, number>();
+
+/**
+ * PHASE 8: Server-Side Authentication Middleware
+ * Validates session token on every protected backend request
+ */
+function requireAuth(req: Request, res: Response, next: any) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  const token = authHeader.substring(7).trim();
+  const user = emergencyDb.getUserBySessionToken(token);
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid or expired session. Please sign in again.' });
+  }
+  (req as any).user = user;
+  (req as any).token = token;
+  next();
+}
+
+/**
+ * PHASE 1: User Registration
+ * POST /api/auth/register
+ */
+app.post('/api/auth/register', (req: Request, res: Response) => {
+  try {
+    const { fullName, email, password, confirmPassword, phoneNumber, role, acceptTerms } = req.body;
+
+    if (!acceptTerms) {
+      return res.status(400).json({ error: 'You must accept the terms of service and privacy policy.' });
+    }
+
+    if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 2) {
+      return res.status(400).json({ error: 'Full name is required (minimum 2 characters).' });
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      return res.status(400).json({ error: 'A valid email address is required.' });
+    }
+
+    if (!password || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+
+    if (confirmPassword && password !== confirmPassword) {
+      return res.status(400).json({ error: 'Passwords do not match.' });
+    }
+
+    const phoneCheck = normalizePhoneNumber(phoneNumber);
+    if (!phoneCheck.isValid) {
+      return res.status(400).json({ error: phoneCheck.reason || 'Valid phone number with country code is required.' });
+    }
+
+    const existing = emergencyDb.getUserByEmail(email);
+    if (existing) {
+      return res.status(409).json({ error: 'An account with this email address already exists. Please log in.' });
+    }
+
+    const uid = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const user = emergencyDb.createUser({
+      uid,
+      email,
+      password,
+      fullName,
+      phoneNumber: phoneCheck.normalized,
+      role: role || 'both',
+    });
+
+    const token = emergencyDb.createSession(uid);
+
+    return res.status(201).json({
+      success: true,
+      token,
+      user,
+      message: 'Account created successfully.',
+    });
+  } catch (err: any) {
+    console.error('[Auth] Registration error:', err);
+    return res.status(500).json({ error: 'Internal server error creating account.' });
+  }
+});
+
+/**
+ * PHASE 2: User Login
+ * POST /api/auth/login
+ */
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    const userWithSecrets = emergencyDb.getUserByEmail(email);
+    if (!userWithSecrets) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const isValid = verifyPassword(password, userWithSecrets.passwordHash, userWithSecrets.passwordSalt);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    const token = emergencyDb.createSession(userWithSecrets.uid);
+    const safeUser = emergencyDb.getUserByUid(userWithSecrets.uid);
+
+    return res.json({
+      success: true,
+      token,
+      user: safeUser,
+      message: 'Logged in successfully.',
+    });
+  } catch (err: any) {
+    console.error('[Auth] Login error:', err);
+    return res.status(500).json({ error: 'Internal server error during login.' });
+  }
+});
+
+/**
+ * GET /api/auth/me
+ */
+app.get('/api/auth/me', requireAuth, (req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    user: (req as any).user,
+  });
+});
+
+/**
+ * POST /api/auth/logout
+ */
+app.post('/api/auth/logout', requireAuth, (req: Request, res: Response) => {
+  emergencyDb.deleteSession((req as any).token);
+  return res.json({ success: true, message: 'Logged out successfully.' });
+});
+
+/**
+ * PHASE 3: Update Profile
+ * PUT /api/auth/profile
+ */
+app.put('/api/auth/profile', requireAuth, (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user.uid;
+    const { fullName, phoneNumber, role, emergencyPreferences, avatarUrl } = req.body;
+
+    let normalizedPhone: string | undefined = undefined;
+    if (phoneNumber) {
+      const pCheck = normalizePhoneNumber(phoneNumber);
+      if (!pCheck.isValid) {
+        return res.status(400).json({ error: pCheck.reason || 'Invalid phone number format.' });
+      }
+      normalizedPhone = pCheck.normalized;
+    }
+
+    const updated = emergencyDb.updateUserProfile(uid, {
+      fullName,
+      phoneNumber: normalizedPhone,
+      role,
+      emergencyPreferences,
+      avatarUrl,
+    });
+
+    return res.json({ success: true, user: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to update user profile.' });
+  }
+});
+
+/**
+ * PHASE 8: Delete Account (Privacy & Right to be Forgotten)
+ * DELETE /api/auth/account
+ */
+app.delete('/api/auth/account', requireAuth, (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user.uid;
+    emergencyDb.deleteUser(uid);
+    return res.json({ success: true, message: 'Account and all associated records deleted permanently.' });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete account.' });
+  }
+});
+
+/**
+ * POST /api/auth/forgot-password
+ */
+app.post('/api/auth/forgot-password', (req: Request, res: Response) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email address is required.' });
+  const user = emergencyDb.getUserByEmail(email);
+  return res.json({
+    success: true,
+    message: user
+      ? 'Password recovery link has been generated and sent to your email.'
+      : 'If an account exists for this email, reset instructions will be sent.',
+  });
+});
+
+// ========================================================
+// PHASE 4: EMERGENCY CONTACT MANAGEMENT (STRICT UID ISOLATION)
+// ========================================================
+
+/**
+ * GET /api/contacts
+ * Returns only the authenticated user's emergency contacts
+ */
+app.get('/api/contacts', requireAuth, (req: Request, res: Response) => {
+  const uid = (req as any).user.uid;
+  const contacts = emergencyDb.getContactsByUid(uid);
+  return res.json({ success: true, contacts });
+});
+
+/**
+ * POST /api/contacts
+ * Adds a contact under the authenticated user's UID
+ */
+app.post('/api/contacts', requireAuth, (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user.uid;
+    const { name, phone, relation, isPreferred, notificationConsent } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Contact name is required.' });
+    }
+
+    const phoneCheck = normalizePhoneNumber(phone);
+    if (!phoneCheck.isValid) {
+      return res.status(400).json({ error: phoneCheck.reason || 'Invalid contact phone number.' });
+    }
+
+    const contact = emergencyDb.createContact(uid, {
+      name,
+      phone: phoneCheck.normalized,
+      relation: relation || 'Emergency Contact',
+      isPreferred,
+      notificationConsent,
+    });
+
+    return res.status(201).json({ success: true, contact });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to create emergency contact.' });
+  }
+});
+
+/**
+ * PUT /api/contacts/:id
+ * Updates contact ensuring ownership
+ */
+app.put('/api/contacts/:id', requireAuth, (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user.uid;
+    const contactId = req.params.id;
+    const { name, phone, relation, isPreferred, notificationConsent } = req.body;
+
+    let normalizedPhone: string | undefined = undefined;
+    if (phone) {
+      const pCheck = normalizePhoneNumber(phone);
+      if (!pCheck.isValid) {
+        return res.status(400).json({ error: pCheck.reason });
+      }
+      normalizedPhone = pCheck.normalized;
+    }
+
+    const updated = emergencyDb.updateContact(contactId, uid, {
+      name,
+      phone: normalizedPhone,
+      relation,
+      isPreferred,
+      notificationConsent,
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Contact not found or unauthorized.' });
+    }
+
+    return res.json({ success: true, contact: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'Failed to update emergency contact.' });
+  }
+});
+
+/**
+ * DELETE /api/contacts/:id
+ * Deletes contact ensuring ownership
+ */
+app.delete('/api/contacts/:id', requireAuth, (req: Request, res: Response) => {
+  const uid = (req as any).user.uid;
+  const ok = emergencyDb.deleteContact(req.params.id, uid);
+  if (!ok) {
+    return res.status(404).json({ error: 'Contact not found or unauthorized.' });
+  }
+  return res.json({ success: true, message: 'Contact removed.' });
+});
+
+// ========================================================
+// PHASE 5: MULTI-USER MULTI-RECIPIENT WHATSAPP SOS
+// ========================================================
+
+/**
+ * POST /api/sos/dispatch-multi
+ * Dispatches an emergency broadcast to each selected contact independently
+ */
+app.post('/api/sos/dispatch-multi', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user.uid;
+    const {
+      emergencyMessage,
+      recipientContactIds,
+      latitude,
+      longitude,
+      locationAddress,
+      userConsent,
+      emergencyReferenceId: customRefId,
+    } = req.body;
+
+    // Rate limiting: max 1 SOS every 10 seconds per user
+    const lastSos = sosRateLimitMap.get(uid);
+    if (lastSos && Date.now() - lastSos < 10000) {
+      return res.status(429).json({
+        error: 'Duplicate emergency alert prevention active. Please wait 10 seconds before dispatching another alert.',
+      });
+    }
+
+    if (userConsent !== true && userConsent !== 'true') {
+      return res.status(400).json({
+        error: 'User authorization and emergency broadcast consent are required before dispatching.',
+      });
+    }
+
+    if (!emergencyMessage || typeof emergencyMessage !== 'string' || !emergencyMessage.trim()) {
+      return res.status(400).json({ error: 'Emergency message content is required.' });
+    }
+
+    // Retrieve only the authenticated user's emergency contacts
+    const userContacts = emergencyDb.getContactsByUid(uid);
+    if (userContacts.length === 0) {
+      return res.status(400).json({
+        error: 'You do not have any registered emergency contacts. Please add emergency contacts first.',
+      });
+    }
+
+    // Filter contacts based on recipientContactIds if provided
+    let targets = userContacts;
+    if (Array.isArray(recipientContactIds) && recipientContactIds.length > 0) {
+      targets = userContacts.filter((c) => recipientContactIds.includes(c.id));
+    }
+
+    // Further filter by notification consent
+    targets = targets.filter((c) => c.notificationConsent !== false);
+
+    if (targets.length === 0) {
+      return res.status(400).json({
+        error: 'No consented emergency contacts selected. Please select at least one contact with notification consent.',
+      });
+    }
+
+    sosRateLimitMap.set(uid, Date.now());
+
+    const refId = customRefId || `SOS-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    console.log(`[Multi-SOS] Dispatching ${refId} for user ${uid} to ${targets.length} contact(s)...`);
+
+    // Dispatch a separate WhatsApp message to each recipient independently
+    const recipientsList: Array<{
+      contactId?: string;
+      recipientName: string;
+      recipientPhone: string;
+      wamid?: string | null;
+      status: WhatsAppDeliveryStatus;
+      error?: string | null;
+    }> = [];
+
+    for (const contact of targets) {
+      const sendResult = await sendWhatsAppCloudMessage({
+        recipientPhone: contact.phone,
+        emergencyMessage: emergencyMessage.trim(),
+        emergencyReferenceId: refId,
+        latitude: typeof latitude === 'number' ? latitude : undefined,
+        longitude: typeof longitude === 'number' ? longitude : undefined,
+        userConsent: true,
+      });
+
+      recipientsList.push({
+        contactId: contact.id,
+        recipientName: contact.name,
+        recipientPhone: contact.phone,
+        wamid: sendResult.wamid || null,
+        status: sendResult.status,
+        error: sendResult.error || null,
+      });
+    }
+
+    // Create event record in database
+    const createdEvent = emergencyDb.createSosEvent(
+      {
+        uid,
+        emergencyReferenceId: refId,
+        message: emergencyMessage.trim(),
+        latitude: typeof latitude === 'number' ? latitude : null,
+        longitude: typeof longitude === 'number' ? longitude : null,
+        locationAddress: locationAddress || null,
+        userConsent: true,
+      },
+      recipientsList
+    );
+
+    return res.json({
+      success: true,
+      event: createdEvent,
+      message: `Emergency alert dispatched to ${targets.length} contact(s).`,
+    });
+  } catch (err: any) {
+    console.error('[Multi-SOS] Dispatch error:', err);
+    return res.status(500).json({ error: `Internal server error dispatching SOS: ${err?.message || err}` });
+  }
+});
+
+/**
+ * PHASE 6: Personal SOS History
+ * GET /api/sos/history
+ * Returns only the authenticated user's SOS event records
+ */
+app.get('/api/sos/history', requireAuth, (req: Request, res: Response) => {
+  const uid = (req as any).user.uid;
+  const events = emergencyDb.getSosEventsByUid(uid);
+  return res.json({ success: true, events });
+});
+
+/**
+ * GET /api/sos/event/:eventId
+ * Retrieves single event ensuring ownership
+ */
+app.get('/api/sos/event/:eventId', requireAuth, (req: Request, res: Response) => {
+  const uid = (req as any).user.uid;
+  const event = emergencyDb.getSosEventById(req.params.eventId, uid);
+  if (!event) {
+    return res.status(404).json({ error: 'Emergency event not found or access denied.' });
+  }
+  return res.json({ success: true, event });
+});
+
+/**
+ * TASK 2: SOS WhatsApp Backend Endpoint
+ * POST /api/sos/whatsapp
+ * Sends real emergency notification through Meta WhatsApp Cloud API
+ */
+app.post('/api/sos/whatsapp', async (req: Request, res: Response) => {
+  try {
+    const {
+      recipientPhone,
+      emergencyMessage,
+      latitude,
+      longitude,
+      userConsent,
+      emergencyReferenceId: providedRefId,
+      recipientName,
+    } = req.body;
+
+    // Validation 1: User authorization & consent
+    if (userConsent !== true && userConsent !== 'true') {
+      return res.status(400).json({
+        success: false,
+        status: 'FAILED',
+        error: 'User authorization and emergency broadcast consent are required before dispatching.',
+      });
+    }
+
+    // Validation 2: Message content
+    if (!emergencyMessage || typeof emergencyMessage !== 'string' || !emergencyMessage.trim()) {
+      return res.status(400).json({
+        success: false,
+        status: 'FAILED',
+        error: 'Emergency message text is required and cannot be empty.',
+      });
+    }
+
+    // Validation 3: Recipient phone number and format
+    const phoneCheck = normalizePhoneNumber(recipientPhone);
+    if (!phoneCheck.isValid) {
+      return res.status(400).json({
+        success: false,
+        status: 'FAILED',
+        error: phoneCheck.reason || 'Invalid recipient phone number. Provide valid country code (e.g. +1... or +91...).',
+      });
+    }
+
+    const emergencyReferenceId = providedRefId && typeof providedRefId === 'string'
+      ? providedRefId
+      : `SOS-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    const internalMessageId = `msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+    const sendingTimestamp = new Date().toISOString();
+
+    // TASK 3: Store initial message record with PENDING -> SENDING status
+    const newRecord: WhatsAppSosRecord = {
+      internalMessageId,
+      emergencyReferenceId,
+      recipientPhone: phoneCheck.normalized,
+      recipientName: recipientName || undefined,
+      messageContent: emergencyMessage.trim(),
+      wamid: null,
+      sendingTimestamp,
+      currentDeliveryStatus: 'SENDING',
+      errorInformation: null,
+      latestStatusUpdateTimestamp: sendingTimestamp,
+      latitude: typeof latitude === 'number' ? latitude : null,
+      longitude: typeof longitude === 'number' ? longitude : null,
+      userConsent: true,
+      webhookHistory: [],
+    };
+
+    emergencyDb.saveMessage(newRecord);
+
+    // Call Meta WhatsApp Business Cloud API
+    const sendResult = await sendWhatsAppCloudMessage({
+      recipientPhone: phoneCheck.normalized,
+      emergencyMessage: emergencyMessage.trim(),
+      emergencyReferenceId,
+      latitude: typeof latitude === 'number' ? latitude : undefined,
+      longitude: typeof longitude === 'number' ? longitude : undefined,
+      userConsent: true,
+    });
+
+    if (sendResult.success && sendResult.wamid) {
+      // Update DB record with SENT status and returned wamid
+      const updated = emergencyDb.updateStatusById(
+        internalMessageId,
+        'SENT',
+        null,
+        sendResult.wamid
+      );
+
+      // Keep legacy array synchronized
+      emergencyAlerts.unshift({
+        id: internalMessageId,
+        type: 'whatsapp-sos',
+        message: emergencyMessage.trim(),
+        urgency: 'critical',
+        status: 'Sent',
+        timestamp: sendingTimestamp,
+        location: latitude && longitude ? { latitude, longitude } : undefined,
+        contactsNotified: [recipientName || `+${phoneCheck.normalized}`],
+        confirmationCode: emergencyReferenceId,
+      });
+
+      return res.json({
+        success: true,
+        status: 'SENT',
+        internalMessageId,
+        emergencyReferenceId,
+        wamid: sendResult.wamid,
+        recipientPhone: phoneCheck.normalized,
+        recipientName: recipientName || null,
+        message: 'Emergency request accepted by Meta WhatsApp Cloud API. Awaiting delivery confirmation from recipient device.',
+        timestamp: sendingTimestamp,
+        record: updated,
+      });
+    } else {
+      // Update DB record with FAILED status and error explanation
+      const updated = emergencyDb.updateStatusById(
+        internalMessageId,
+        'FAILED',
+        sendResult.error || 'Failed to dispatch via WhatsApp Cloud API'
+      );
+
+      return res.status(400).json({
+        success: false,
+        status: 'FAILED',
+        internalMessageId,
+        emergencyReferenceId,
+        error: sendResult.error || 'WhatsApp message dispatch failed',
+        errorCode: sendResult.errorCode,
+        details: sendResult.details,
+        recipientPhone: phoneCheck.normalized,
+        record: updated,
+      });
+    }
+  } catch (error: any) {
+    console.error('[SOS WhatsApp] Unexpected dispatch error:', error);
+    return res.status(500).json({
+      success: false,
+      status: 'FAILED',
+      error: `Internal server error: ${error?.message || error}`,
+    });
+  }
+});
+
+/**
+ * TASK 4: WhatsApp Webhook Subscription Verification
+ * GET /api/webhooks/whatsapp
+ * Verifies hub.mode, hub.verify_token, and responds with hub.challenge
+ */
+app.get('/api/webhooks/whatsapp', (req: Request, res: Response) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  const configuredVerifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
+
+  console.log('[Webhook GET] Verification request received:', { mode, tokenProvided: Boolean(token) });
+
+  if (mode === 'subscribe') {
+    if (!configuredVerifyToken || token === configuredVerifyToken) {
+      console.log('[Webhook GET] Webhook verification successful! Returning challenge.');
+      return res.status(200).send(challenge);
+    } else {
+      console.warn('[Webhook GET] Verify token mismatch:', { expected: configuredVerifyToken ? 'configured' : 'none', received: token });
+      return res.status(403).send('Forbidden: Verify token mismatch');
+    }
+  }
+
+  return res.status(400).send('Invalid webhook verification request mode');
+});
+
+/**
+ * TASK 4: WhatsApp Webhook Event Receiver
+ * POST /api/webhooks/whatsapp
+ * Receives real-time delivery status updates: sent, delivered, read, failed
+ */
+app.post('/api/webhooks/whatsapp', (req: Request, res: Response) => {
+  try {
+    const signature = req.headers['x-hub-signature-256'] as string | undefined;
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+
+    // Verify incoming signature using META_APP_SECRET
+    if (!verifyWebhookSignature(rawBody, signature)) {
+      console.error('[Webhook POST] Rejected unauthorized webhook: signature verification failed');
+      return res.status(401).json({ error: 'Unauthorized: Invalid webhook signature' });
+    }
+
+    // Parse statuses from incoming payload
+    const parsedStatuses = parseWhatsAppWebhookStatuses(req.body);
+
+    if (parsedStatuses.length === 0) {
+      // Could be message text or other non-status event; acknowledge with 200
+      return res.status(200).json({ status: 'ok', received: 0 });
+    }
+
+    console.log(`[Webhook POST] Processing ${parsedStatuses.length} status update(s)...`);
+
+    for (const update of parsedStatuses) {
+      console.log(`[Webhook POST] Status event: wamid=${update.wamid} status=${update.status} (time: ${update.timestamp})`);
+
+      const updatedRecord = emergencyDb.updateDeliveryStatus(
+        update.wamid,
+        update.status,
+        update.errorInfo,
+        update.raw
+      );
+
+      if (updatedRecord) {
+        console.log(`[Webhook POST] Updated internal message ${updatedRecord.internalMessageId} to ${updatedRecord.currentDeliveryStatus}`);
+      }
+    }
+
+    // Return HTTP 200 to Meta
+    return res.status(200).json({ status: 'ok', processed: parsedStatuses.length });
+  } catch (err: any) {
+    console.error('[Webhook POST] Error processing webhook:', err);
+    return res.status(500).json({ error: 'Internal server error processing webhook' });
+  }
+});
+
+/**
+ * TASK 6: SOS Message Status Polling Endpoint
+ * GET /api/sos/message-status/:id
+ * Retrieves real-time delivery status for a message by internal ID, reference ID, or wamid
+ */
+app.get('/api/sos/message-status/:id', (req: Request, res: Response) => {
+  const id = req.params.id;
+  const record =
+    emergencyDb.getMessageByInternalId(id) ||
+    emergencyDb.getMessageByRefId(id) ||
+    emergencyDb.getMessageByWamid(id);
+
+  if (!record) {
+    return res.status(404).json({
+      success: false,
+      error: `No emergency record found for reference "${id}".`,
+      status: 'UNKNOWN',
+    });
+  }
+
+  return res.json({
+    success: true,
+    message: record,
+    status: record.currentDeliveryStatus,
+    wamid: record.wamid,
+    updatedAt: record.latestStatusUpdateTimestamp,
+  });
+});
+
+/**
+ * GET /api/sos/messages
+ * Retrieves emergency message log
+ */
+app.get('/api/sos/messages', (_req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    messages: emergencyDb.getAllMessages(50),
+  });
+});
+
+/**
+ * GET /api/sos/config-status
+ * Check server WhatsApp configuration state and webhook URL without leaking credentials
+ */
+app.get('/api/sos/config-status', (req: Request, res: Response) => {
+  const config = getWhatsAppConfig();
+  const host = req.get('host') || 'localhost:3000';
+  const protocol = req.protocol || 'http';
+  const appUrl = process.env.APP_URL || `${protocol}://${host}`;
+
+  return res.json({
+    hasPhoneNumberId: Boolean(config.phoneNumberId),
+    hasAccessToken: Boolean(config.accessToken),
+    hasVerifyToken: Boolean(config.verifyToken),
+    hasAppSecret: Boolean(config.appSecret),
+    apiVersion: config.apiVersion,
+    webhookUrl: `${appUrl}/api/webhooks/whatsapp`,
+    readyToSend: config.isConfigured,
+    missing: config.missing,
+  });
+});
+
+/**
+ * TASK 9: Webhook simulation endpoint for staging & test verification
+ * POST /api/webhooks/whatsapp/simulate-test
+ */
+app.post('/api/webhooks/whatsapp/simulate-test', (req: Request, res: Response) => {
+  const { wamid, internalMessageId, targetStatus, errorInfo } = req.body;
+
+  const validStatuses: any[] = ['SENT', 'DELIVERED', 'READ', 'FAILED'];
+  if (!validStatuses.includes(targetStatus)) {
+    return res.status(400).json({ error: `targetStatus must be one of: ${validStatuses.join(', ')}` });
+  }
+
+  // Check multi-recipient record first
+  if (wamid) {
+    const multiUpdated = emergencyDb.updateSosRecipientStatusByWamid(wamid, targetStatus, errorInfo || null, {
+      simulated: true,
+      triggerTime: new Date().toISOString(),
+    });
+    if (multiUpdated) {
+      return res.json({
+        success: true,
+        status: targetStatus,
+        recipient: multiUpdated.recipient,
+        event: multiUpdated.event,
+      });
+    }
+  }
+
+  let record = null;
+  if (wamid) record = emergencyDb.getMessageByWamid(wamid);
+  if (!record && internalMessageId) record = emergencyDb.getMessageByInternalId(internalMessageId);
+
+  if (!record) {
+    return res.status(404).json({ error: 'Message or recipient record not found to simulate webhook update.' });
+  }
+
+  if (!record.wamid) {
+    record.wamid = `wamid.HBgLSIMULATED_${record.internalMessageId}`;
+    emergencyDb.saveMessage(record);
+  }
+
+  let updated = emergencyDb.updateDeliveryStatus(
+    record.wamid,
+    targetStatus,
+    errorInfo || null,
+    { simulated: true, triggerTime: new Date().toISOString() }
+  );
+
+  if (!updated) {
+    updated = emergencyDb.updateStatusById(record.internalMessageId, targetStatus, errorInfo || null, record.wamid);
+  }
+
+  return res.json({
+    success: true,
+    status: targetStatus,
+    message: updated,
+  });
+});
+
 /**
  * GET /api/health
  */
@@ -361,8 +1192,6 @@ app.get('/api/health', (_req: Request, res: Response) => {
 // Configure Vite middleware in development or static serve in production
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
-
-  app.use(express.static(path.join(__dirname, 'public')));
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');

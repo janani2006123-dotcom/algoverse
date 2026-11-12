@@ -1,25 +1,41 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
-  SignLanguageType,
-  SpokenLanguageType,
-  UserPreferences,
   UserProfile,
+  UserPreferences,
   EmergencyContact,
   EmergencyAlert,
   ConversationMessage,
+  SignLanguageType,
+  SpokenLanguageType,
+  UserAccount,
 } from '../types';
 
 interface AppContextType {
   currentPage: string;
   setCurrentPage: (page: string) => void;
   user: UserProfile | null;
+  authToken: string | null;
+  registerAccount: (data: {
+    fullName: string;
+    email: string;
+    password: string;
+    confirmPassword?: string;
+    phoneNumber: string;
+    role?: 'signer' | 'speaker' | 'both' | 'learner';
+    acceptTerms: boolean;
+  }) => Promise<{ success: boolean; error?: string }>;
+  loginWithCredentials: (email: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string }>;
   login: (email: string, name?: string, role?: UserProfile['role']) => void;
   logout: () => void;
+  updateUserProfileData: (data: Partial<Pick<UserAccount, 'fullName' | 'phoneNumber' | 'role' | 'avatarUrl' | 'emergencyPreferences'>>) => Promise<{ success: boolean; error?: string }>;
+  deleteUserAccount: () => Promise<{ success: boolean; error?: string }>;
   preferences: UserPreferences;
   updatePreferences: (prefs: Partial<UserPreferences>) => void;
   emergencyContacts: EmergencyContact[];
-  addEmergencyContact: (contact: Omit<EmergencyContact, 'id'>) => void;
-  removeEmergencyContact: (id: string) => void;
+  refreshContacts: () => Promise<void>;
+  addEmergencyContact: (contact: Omit<EmergencyContact, 'id'>) => Promise<void>;
+  updateEmergencyContactRemote: (id: string, contact: Partial<EmergencyContact>) => Promise<boolean>;
+  removeEmergencyContact: (id: string) => Promise<void>;
   recentAlerts: EmergencyAlert[];
   addAlert: (alert: EmergencyAlert) => void;
   savedVocabulary: string[];
@@ -64,7 +80,7 @@ const DEFAULT_PREFERENCES: UserPreferences = {
 };
 
 const DEFAULT_USER: UserProfile = {
-  id: 'usr_demo_101',
+  id: 'usr_guest',
   name: 'Alex Rivera',
   email: 'alex@example.com',
   role: 'both',
@@ -72,7 +88,6 @@ const DEFAULT_USER: UserProfile = {
   savedVocabulary: ['hello', 'help', 'doctor', 'ambulance'],
   quizScores: [
     { quizId: 'quiz-1', score: 100, total: 100, date: '2026-11-10' },
-    { quizId: 'quiz-2', score: 100, total: 100, date: '2026-11-11' },
   ],
   emergencyContacts: [
     {
@@ -82,14 +97,8 @@ const DEFAULT_USER: UserProfile = {
       relation: 'Spouse',
       notifySms: true,
       notifyCall: true,
-    },
-    {
-      id: 'contact-2',
-      name: 'Dr. Michael Chen (Care Team)',
-      phone: '+1 (555) 876-5432',
-      relation: 'Physician',
-      notifySms: true,
-      notifyCall: false,
+      isPreferred: true,
+      notificationConsent: true,
     },
   ],
 };
@@ -98,6 +107,10 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentPage, setCurrentPage] = useState<string>('home');
+  const [authToken, setAuthToken] = useState<string | null>(() => {
+    return localStorage.getItem('signbridge_auth_token') || null;
+  });
+
   const [user, setUser] = useState<UserProfile | null>(() => {
     const saved = localStorage.getItem('signbridge_user');
     return saved ? JSON.parse(saved) : DEFAULT_USER;
@@ -148,45 +161,86 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }>
   >(() => {
     const saved = localStorage.getItem('signbridge_history');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        // ignore
-      }
-    }
-    return [
-      {
-        id: 'hist-1',
-        type: 'sign-to-voice',
-        source: 'HELP (thumbs up lifting on flat palm)',
-        target: 'I need assistance right now.',
-        signLanguage: 'ASL',
-        timestamp: '10 mins ago',
-      },
-      {
-        id: 'hist-2',
-        type: 'voice-to-sign',
-        source: 'Where is the doctor clinic?',
-        target: 'DOCTOR CLINIC WHERE?',
-        signLanguage: 'ASL',
-        timestamp: '25 mins ago',
-      },
-      {
-        id: 'hist-3',
-        type: 'sign-to-voice',
-        source: 'THANK-YOU',
-        target: 'Thank you very much.',
-        signLanguage: 'ISL',
-        timestamp: '1 hour ago',
-      },
-    ];
+    return saved
+      ? JSON.parse(saved)
+      : [
+          {
+            id: 'h-1',
+            type: 'voice-to-sign',
+            source: 'Hello, good to see you today.',
+            target: 'HELLO SEE TODAY GOOD',
+            signLanguage: 'ASL',
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          },
+        ];
   });
 
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
-  // Sync theme and accessibility class on html root element
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 3500);
+  }, []);
+
+  // Sync contacts from server when authToken changes
+  const refreshContacts = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const res = await fetch('/api/contacts', {
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.contacts)) {
+          setEmergencyContacts(data.contacts);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch emergency contacts from server:', err);
+    }
+  }, [authToken]);
+
+  // Restore authenticated session on mount
+  useEffect(() => {
+    if (!authToken) return;
+    async function verifySession() {
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.user) {
+            const profile: UserProfile = {
+              id: data.user.uid,
+              name: data.user.fullName,
+              email: data.user.email,
+              role: data.user.role || 'both',
+              completedLessons: ['hello', 'thank-you', 'help'],
+              savedVocabulary: ['hello', 'help'],
+              quizScores: [],
+              emergencyContacts: [],
+            };
+            setUser(profile);
+            localStorage.setItem('signbridge_user', JSON.stringify(profile));
+            refreshContacts();
+          }
+        } else {
+          // Token invalid or expired
+          setAuthToken(null);
+          localStorage.removeItem('signbridge_auth_token');
+        }
+      } catch (e) {
+        console.warn('Session verification notice:', e);
+      }
+    }
+    verifySession();
+  }, [authToken, refreshContacts]);
+
+  // Apply visual accessibility themes
   useEffect(() => {
     const root = document.documentElement;
     if (preferences.theme === 'dark') {
@@ -227,47 +281,271 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast('Preferences updated', 'info');
   };
 
-  const login = (email: string, name?: string, role?: UserProfile['role']) => {
-    const newUser: UserProfile = {
-      ...DEFAULT_USER,
-      email,
-      name: name || email.split('@')[0],
-      role: role || 'both',
-    };
-    setUser(newUser);
-    localStorage.setItem('signbridge_user', JSON.stringify(newUser));
-    showToast(`Welcome back, ${newUser.name}!`, 'success');
+  /**
+   * PHASE 1: User Registration
+   */
+  const registerAccount = async (data: {
+    fullName: string;
+    email: string;
+    password: string;
+    confirmPassword?: string;
+    phoneNumber: string;
+    role?: 'signer' | 'speaker' | 'both' | 'learner';
+    acceptTerms: boolean;
+  }) => {
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+
+      const resData = await res.json();
+      if (!res.ok || !resData.success) {
+        return { success: false, error: resData.error || 'Registration failed.' };
+      }
+
+      const token = resData.token;
+      setAuthToken(token);
+      localStorage.setItem('signbridge_auth_token', token);
+
+      const profile: UserProfile = {
+        id: resData.user.uid,
+        name: resData.user.fullName,
+        email: resData.user.email,
+        role: resData.user.role || 'both',
+        completedLessons: ['hello', 'thank-you', 'help'],
+        savedVocabulary: ['hello', 'help'],
+        quizScores: [],
+        emergencyContacts: [],
+      };
+
+      setUser(profile);
+      localStorage.setItem('signbridge_user', JSON.stringify(profile));
+      setEmergencyContacts([]);
+      showToast(`Welcome to SignBridge, ${resData.user.fullName}!`, 'success');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error during registration.' };
+    }
   };
 
-  const logout = () => {
+  /**
+   * PHASE 2: User Login
+   */
+  const loginWithCredentials = async (email: string, password: string, remember: boolean = true) => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const resData = await res.json();
+      if (!res.ok || !resData.success) {
+        return { success: false, error: resData.error || 'Invalid email or password.' };
+      }
+
+      const token = resData.token;
+      setAuthToken(token);
+      if (remember) {
+        localStorage.setItem('signbridge_auth_token', token);
+      } else {
+        sessionStorage.setItem('signbridge_auth_token', token);
+      }
+
+      const profile: UserProfile = {
+        id: resData.user.uid,
+        name: resData.user.fullName,
+        email: resData.user.email,
+        role: resData.user.role || 'both',
+        completedLessons: ['hello', 'thank-you', 'help'],
+        savedVocabulary: ['hello', 'help'],
+        quizScores: [],
+        emergencyContacts: [],
+      };
+
+      setUser(profile);
+      localStorage.setItem('signbridge_user', JSON.stringify(profile));
+
+      // Fetch user's isolated emergency contacts
+      const cRes = await fetch('/api/contacts', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (cRes.ok) {
+        const cData = await cRes.json();
+        if (cData.success && Array.isArray(cData.contacts)) {
+          setEmergencyContacts(cData.contacts);
+        }
+      }
+
+      showToast(`Welcome back, ${resData.user.fullName}!`, 'success');
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Network error during login.' };
+    }
+  };
+
+  // Instant demo persona login helper
+  const login = async (email: string, name?: string, role?: UserProfile['role']) => {
+    // Try login or register with default demo password
+    const loginAttempt = await loginWithCredentials(email, 'SignBridge2026!');
+    if (loginAttempt.success) return;
+
+    // Register demo persona on the fly
+    await registerAccount({
+      fullName: name || email.split('@')[0],
+      email,
+      password: 'SignBridge2026!',
+      confirmPassword: 'SignBridge2026!',
+      phoneNumber: '+15550192834',
+      role: role || 'both',
+      acceptTerms: true,
+    });
+  };
+
+  const logout = async () => {
+    if (authToken) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+      } catch {
+        // ignore
+      }
+    }
+    setAuthToken(null);
     setUser(null);
+    setEmergencyContacts([]);
+    localStorage.removeItem('signbridge_auth_token');
+    sessionStorage.removeItem('signbridge_auth_token');
     localStorage.removeItem('signbridge_user');
     showToast('Signed out successfully', 'info');
   };
 
-  const addEmergencyContact = (contact: Omit<EmergencyContact, 'id'>) => {
+  const updateUserProfileData = async (data: any) => {
+    if (!authToken) return { success: false, error: 'Not authenticated.' };
+    try {
+      const res = await fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify(data),
+      });
+      const resData = await res.json();
+      if (!res.ok || !resData.success) {
+        return { success: false, error: resData.error || 'Profile update failed.' };
+      }
+      if (user) {
+        const updated = {
+          ...user,
+          name: resData.user.fullName,
+          role: resData.user.role,
+        };
+        setUser(updated);
+        localStorage.setItem('signbridge_user', JSON.stringify(updated));
+      }
+      showToast('Profile updated successfully', 'success');
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Network error' };
+    }
+  };
+
+  const deleteUserAccount = async () => {
+    if (!authToken) return { success: false, error: 'Not authenticated.' };
+    try {
+      const res = await fetch('/api/auth/account', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const resData = await res.json();
+      if (!res.ok || !resData.success) {
+        return { success: false, error: resData.error || 'Failed to delete account.' };
+      }
+      logout();
+      showToast('Account and all associated records deleted permanently.', 'info');
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Network error' };
+    }
+  };
+
+  /**
+   * PHASE 4: Remote Contact Management
+   */
+  const addEmergencyContact = async (contact: Omit<EmergencyContact, 'id'>) => {
+    if (authToken) {
+      try {
+        const res = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(contact),
+        });
+        const data = await res.json();
+        if (res.ok && data.success && data.contact) {
+          setEmergencyContacts((prev) => [data.contact, ...prev]);
+          showToast(`Added emergency contact: ${contact.name}`, 'success');
+          return;
+        }
+      } catch (e) {
+        console.warn('Backend contact save error, falling back locally:', e);
+      }
+    }
+
+    // Local fallback
     const newContact: EmergencyContact = {
       ...contact,
       id: `c_${Date.now()}`,
     };
-    const updated = [...emergencyContacts, newContact];
-    setEmergencyContacts(updated);
-    if (user) {
-      const updatedUser = { ...user, emergencyContacts: updated };
-      setUser(updatedUser);
-      localStorage.setItem('signbridge_user', JSON.stringify(updatedUser));
-    }
+    setEmergencyContacts((prev) => [newContact, ...prev]);
     showToast(`Added emergency contact: ${contact.name}`, 'success');
   };
 
-  const removeEmergencyContact = (id: string) => {
-    const updated = emergencyContacts.filter((c) => c.id !== id);
-    setEmergencyContacts(updated);
-    if (user) {
-      const updatedUser = { ...user, emergencyContacts: updated };
-      setUser(updatedUser);
-      localStorage.setItem('signbridge_user', JSON.stringify(updatedUser));
+  const updateEmergencyContactRemote = async (id: string, contact: Partial<EmergencyContact>): Promise<boolean> => {
+    if (authToken) {
+      try {
+        const res = await fetch(`/api/contacts/${id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(contact),
+        });
+        const data = await res.json();
+        if (res.ok && data.success && data.contact) {
+          setEmergencyContacts((prev) => prev.map((c) => (c.id === id ? data.contact : c)));
+          showToast('Emergency contact updated', 'success');
+          return true;
+        }
+      } catch (e) {
+        console.warn('Update contact error:', e);
+      }
     }
+    setEmergencyContacts((prev) => prev.map((c) => (c.id === id ? { ...c, ...contact } : c)));
+    showToast('Emergency contact updated', 'success');
+    return true;
+  };
+
+  const removeEmergencyContact = async (id: string) => {
+    if (authToken) {
+      try {
+        await fetch(`/api/contacts/${id}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+      } catch {
+        // ignore
+      }
+    }
+    setEmergencyContacts((prev) => prev.filter((c) => c.id !== id));
     showToast('Emergency contact removed', 'info');
   };
 
@@ -284,17 +562,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setUser(updatedUser);
         localStorage.setItem('signbridge_user', JSON.stringify(updatedUser));
       }
-      showToast(exists ? 'Word removed from saved list' : 'Word saved to your vocabulary', 'info');
+      showToast(exists ? 'Word removed from saved dictionary' : 'Word bookmarked to your dictionary', 'info');
       return next;
     });
   };
 
   const addConversationMessage = (msg: Omit<ConversationMessage, 'id' | 'timestamp'>) => {
-    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const newMsg: ConversationMessage = {
       ...msg,
-      id: `conv_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-      timestamp: time,
+      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     setConversationHistory((prev) => [...prev, newMsg]);
   };
@@ -310,15 +587,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     target: string,
     signLanguage: SignLanguageType
   ) => {
-    const record = {
-      id: `tr_${Date.now()}`,
+    const newRecord = {
+      id: `rec-${Date.now()}`,
       type,
       source,
       target,
       signLanguage,
-      timestamp: 'Just now',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
-    setTranslationHistory((prev) => [record, ...prev.slice(0, 49)]);
+    setTranslationHistory((prev) => [newRecord, ...prev.slice(0, 49)]);
   };
 
   const clearTranslationHistory = () => {
@@ -327,26 +604,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     showToast('Translation history cleared', 'info');
   };
 
-  // Browser SpeechSynthesis API handler
   const speakText = (text: string) => {
     if (!('speechSynthesis' in window)) {
-      showToast('Text-to-speech is not supported in this browser', 'error');
+      showToast('Speech synthesis not supported in this browser.', 'error');
       return;
     }
-    window.speechSynthesis.cancel();
-    if (!text.trim()) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = preferences.speechRate;
+      utterance.pitch = preferences.speechPitch;
+      utterance.volume = preferences.speechVolume;
+      utterance.lang = preferences.preferredSpokenLanguage;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = preferences.speechRate;
-    utterance.pitch = preferences.speechPitch;
-    utterance.volume = preferences.speechVolume;
-    utterance.lang = preferences.preferredSpokenLanguage;
+      utterance.onstart = () => setIsSpeaking(true);
+      utterance.onend = () => setIsSpeaking(false);
+      utterance.onerror = () => setIsSpeaking(false);
 
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.error('Speech synthesis error:', err);
+      setIsSpeaking(false);
+    }
   };
 
   const stopSpeaking = () => {
@@ -356,25 +635,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    setToast({ message, type });
-    setTimeout(() => {
-      setToast((curr) => (curr?.message === message ? null : curr));
-    }, 3500);
-  };
-
   return (
     <AppContext.Provider
       value={{
         currentPage,
         setCurrentPage,
         user,
+        authToken,
+        registerAccount,
+        loginWithCredentials,
         login,
         logout,
+        updateUserProfileData,
+        deleteUserAccount,
         preferences,
         updatePreferences,
         emergencyContacts,
+        refreshContacts,
         addEmergencyContact,
+        updateEmergencyContactRemote,
         removeEmergencyContact,
         recentAlerts,
         addAlert,

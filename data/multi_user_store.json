@@ -1,0 +1,145 @@
+{
+  "users": [
+    {
+      "uid": "usr_1794479264707_f7nmk",
+      "email": "alice.test@signbridge.org",
+      "fullName": "Alice Signer",
+      "phoneNumber": "15551112222",
+      "role": "signer",
+      "createdAt": "2026-11-12T10:27:44.773Z",
+      "avatarUrl": "/src/assets/images/signbridge_interpreter_avatar_1794470891825.jpg",
+      "emergencyPreferences": {
+        "notifySms": true,
+        "notifyCall": true,
+        "autoAttachLocation": true
+      },
+      "passwordHash": "1ec7b2c0e9ce6dc9fde4211977de7787a458d49270f4eccbbce3f335be3c1c1fbe7f2ae886b7a60f6199e065007b16f180c354d52d420e4e54a81b8f2411052d",
+      "passwordSalt": "c38bf4f6fea80b9a5d193bf5fefa7f11"
+    },
+    {
+      "uid": "usr_1794479264794_gz3x0",
+      "email": "bob.test@signbridge.org",
+      "fullName": "Bob Speaker",
+      "phoneNumber": "15553334444",
+      "role": "speaker",
+      "createdAt": "2026-11-12T10:27:44.853Z",
+      "avatarUrl": "/src/assets/images/signbridge_interpreter_avatar_1794470891825.jpg",
+      "emergencyPreferences": {
+        "notifySms": true,
+        "notifyCall": true,
+        "autoAttachLocation": true
+      },
+      "passwordHash": "734e2adb57404e70445c49c171d5e0256bc0f331daebd70b442771ff7e1580f405d7b8e87f841534a7f504d246e80606b0bb9aef022c158fd679e16b55892131",
+      "passwordSalt": "5123e10d8cb90b734c2fc93877355294"
+    }
+  ],
+  "contacts": [
+    {
+      "id": "cnt_1794479264865_2odka",
+      "uid": "usr_1794479264707_f7nmk",
+      "name": "Alice Emergency Contact 1",
+      "phone": "15551119999",
+      "relation": "Parent",
+      "notifySms": true,
+      "notifyCall": true,
+      "isPreferred": true,
+      "notificationConsent": true,
+      "createdAt": "2026-11-12T10:27:44.865Z",
+      "updatedAt": "2026-11-12T10:27:44.865Z"
+    },
+    {
+      "id": "cnt_1794479264875_54z5n",
+      "uid": "usr_1794479264794_gz3x0",
+      "name": "Bob Emergency Contact 1",
+      "phone": "15553338888",
+      "relation": "Doctor",
+      "notifySms": true,
+      "notifyCall": true,
+      "isPreferred": true,
+      "notificationConsent": true,
+      "createdAt": "2026-11-12T10:27:44.875Z",
+      "updatedAt": "2026-11-12T10:27:44.875Z"
+    }
+  ],
+  "events": [
+    {
+      "eventId": "sos_1794479264897_gdton",
+      "uid": "usr_1794479264707_f7nmk",
+      "emergencyReferenceId": "SOS-237068",
+      "message": "EMERGENCY: Need urgent assistance at medical station.",
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "locationAddress": null,
+      "userConsent": true,
+      "createdAt": "2026-11-12T10:27:44.897Z",
+      "overallStatus": "FAILED",
+      "recipients": [
+        {
+          "recipientId": "rcp_1794479264897_2h0k6",
+          "eventId": "sos_1794479264897_gdton",
+          "uid": "usr_1794479264707_f7nmk",
+          "contactId": "cnt_1794479264865_2odka",
+          "recipientName": "Alice Emergency Contact 1",
+          "recipientPhone": "15551119999",
+          "wamid": null,
+          "deliveryStatus": "FAILED",
+          "errorInformation": "Meta WhatsApp Cloud API credentials not configured in server environment. Missing: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN.",
+          "sentAt": "2026-11-12T10:27:44.897Z",
+          "updatedAt": "2026-11-12T10:27:44.897Z",
+          "webhookHistory": []
+        }
+      ]
+    }
+  ],
+  "recipients": [
+    {
+      "recipientId": "rcp_1794479264897_2h0k6",
+      "eventId": "sos_1794479264897_gdton",
+      "uid": "usr_1794479264707_f7nmk",
+      "contactId": "cnt_1794479264865_2odka",
+      "recipientName": "Alice Emergency Contact 1",
+      "recipientPhone": "15551119999",
+      "wamid": null,
+      "deliveryStatus": "FAILED",
+      "errorInformation": "Meta WhatsApp Cloud API credentials not configured in server environment. Missing: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN.",
+      "sentAt": "2026-11-12T10:27:44.897Z",
+      "updatedAt": "2026-11-12T10:27:44.897Z",
+      "webhookHistory": []
+    }
+  ],
+  "legacyMessages": [
+    {
+      "internalMessageId": "msg-1794477086812-6sqlgl",
+      "emergencyReferenceId": "SOS-413845",
+      "recipientPhone": "15550192834",
+      "recipientName": "Sarah Rivera",
+      "messageContent": "Medical emergency, please send help",
+      "wamid": "wamid.HBgLSIMULATED_msg-1794477086812-6sqlgl",
+      "sendingTimestamp": "2026-11-12T09:51:26.812Z",
+      "currentDeliveryStatus": "READ",
+      "errorInformation": "Meta WhatsApp Cloud API credentials not configured in server environment. Missing: WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_ACCESS_TOKEN, WHATSAPP_VERIFY_TOKEN.",
+      "latestStatusUpdateTimestamp": "2026-11-12T09:53:37.216Z",
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "userConsent": true,
+      "webhookHistory": [
+        {
+          "status": "DELIVERED",
+          "timestamp": "2026-11-12T09:53:26.206Z",
+          "raw": {
+            "simulated": true,
+            "triggerTime": "2026-11-12T09:53:26.205Z"
+          }
+        },
+        {
+          "status": "READ",
+          "timestamp": "2026-11-12T09:53:37.216Z",
+          "raw": {
+            "simulated": true,
+            "triggerTime": "2026-11-12T09:53:37.216Z"
+          }
+        }
+      ]
+    }
+  ]
+}
