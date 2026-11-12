@@ -1,0 +1,10 @@
+{
+  "name": "SignBridge – Sign Language & Voice Communication Platform",
+  "description": "Accessible real-time sign language, speech recognition, and translation platform bridging communication for Deaf, hard-of-hearing, and hearing communities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
