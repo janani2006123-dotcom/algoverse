@@ -3,10 +3,8 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
-<<<<<<< HEAD
 import https from 'https';
 import querystring from 'querystring';
-=======
 import { emergencyDb, verifyPassword } from './src/server/db';
 import {
   sendWhatsAppCloudMessage,
@@ -16,7 +14,6 @@ import {
   normalizePhoneNumber,
 } from './src/server/whatsappService';
 import { WhatsAppSosRecord, WhatsAppDeliveryStatus } from './src/types';
->>>>>>> origin/main
 
 dotenv.config();
 
